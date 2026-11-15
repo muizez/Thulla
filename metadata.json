@@ -1,0 +1,8 @@
+{
+  "name": "Thulla — Multiplayer Party Game",
+  "description": "Real-time Pakistani university party game of chaos, challenges, and friendship with customizable rules, live WebSocket rooms, and persistent match history.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
