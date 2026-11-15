@@ -12,6 +12,11 @@ import {
   WifiOff,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
+import {
+  getOrderedTableSeats,
+  type OrderedTableSeat,
+  type SeatRelation,
+} from '../game/tableLayout';
 import type { PublicGameState } from '../game/types';
 import { soundFx } from '../utils/sound';
 import { AvatarIcon } from '../components/AvatarIcon';
@@ -24,6 +29,87 @@ interface CardTablePageProps {
   error: string | null;
   onPlayCard: (cardId: string) => void;
   onLeaveRoom: () => void;
+}
+
+function relationLabel(
+  relation: SeatRelation,
+  stepIndex: number,
+  playerCount: number
+): string {
+  if (relation === 'AFTER_YOU') return 'Plays After You';
+  if (relation === 'BEFORE_YOU') return 'Played Before';
+  if (playerCount === 2) return 'Across Table';
+  return `Turn #${stepIndex + 1}`;
+}
+
+function SeatCard({
+  seat,
+  isTurn,
+  playerCount,
+  compact = false,
+}: {
+  seat: OrderedTableSeat;
+  isTurn: boolean;
+  playerCount: number;
+  compact?: boolean;
+}) {
+  const opp = seat.player;
+  const escaped = opp.finishedRank !== null;
+  const relText = relationLabel(seat.relation, seat.stepIndex, playerCount);
+
+  return (
+    <div
+      data-seat-relation={compact ? undefined : seat.relation}
+      data-seat-step={compact ? undefined : seat.stepIndex}
+      className={`${
+        compact ? 'w-full' : 'w-[172px] lg:w-[196px]'
+      } p-2.5 rounded-xl border backdrop-blur-sm transition-all flex items-center justify-between gap-2 ${
+        isTurn
+          ? 'bg-[#1a2234]/95 border-amber-400 shadow-lg shadow-amber-950/45'
+          : escaped
+            ? 'bg-emerald-950/60 border-emerald-500/40 opacity-85'
+            : 'bg-[#111827]/95 border-white/15 shadow-md shadow-black/40'
+      }`}
+    >
+      <div className="flex items-center gap-2 min-w-0">
+        <AvatarIcon avatarId={opp.avatar} size="sm" />
+        <div className="min-w-0">
+          <div className="text-xs font-bold text-white truncate flex items-center gap-1">
+            <span className="truncate">{opp.username}</span>
+            {opp.isBot && <Bot className="w-3 h-3 text-sky-400 shrink-0" />}
+          </div>
+          <div className="text-[10px] font-semibold tracking-tight text-slate-400">
+            <span
+              className={
+                seat.relation === 'AFTER_YOU'
+                  ? 'text-sky-300'
+                  : seat.relation === 'BEFORE_YOU'
+                    ? 'text-emerald-300'
+                    : 'text-slate-400'
+              }
+            >
+              {relText}
+            </span>
+          </div>
+          <div className="text-[11px] text-slate-400 tabular-nums">
+            {escaped ? (
+              <span className="text-emerald-300 font-semibold">
+                Escaped #{opp.finishedRank}
+              </span>
+            ) : opp.connectionStatus === 'DISCONNECTED' ? (
+              <span className="text-amber-400">Disconnected</span>
+            ) : isTurn ? (
+              <span className="text-amber-300 font-semibold">Thinking...</span>
+            ) : (
+              <span>{opp.cardCount} cards</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {!escaped && <CardBack count={opp.cardCount} />}
+    </div>
+  );
 }
 
 export function CardTablePage({
@@ -41,18 +127,16 @@ export function CardTablePage({
   const [showLog, setShowLog] = useState(false);
 
   const me = game.players.find((p) => p.userId === currentUserId);
-  const myIndex = game.players.findIndex((p) => p.userId === currentUserId);
   const isMyTurn = Boolean(me && game.currentTurnPlayerId === me.id);
   const playableSet = new Set(game.playableCardIds);
 
-  // Arrange opponents clockwise starting after current player
-  const opponents =
-    myIndex >= 0
-      ? [
-          ...game.players.slice(myIndex + 1),
-          ...game.players.slice(0, myIndex),
-        ]
-      : game.players;
+  const { geometry, seats } = getOrderedTableSeats(
+    game.players,
+    currentUserId,
+    game.rules.turnDirection
+  );
+  const opponentSeats = seats.filter((s) => s.stepIndex > 0);
+  const selfSeat = seats.find((s) => s.stepIndex === 0);
 
   // Clear selection whenever turn changes or card leaves hand
   useEffect(() => {
@@ -117,6 +201,11 @@ export function CardTablePage({
     (p) => p.id === game.currentTurnPlayerId
   );
 
+  // Mobile ordering: Left column starts with AFTER_YOU (bottom-to-top flow), Right column ends with BEFORE_YOU
+  const leftSplitCount = Math.ceil(opponentSeats.length / 2);
+  const mobileLeftSeats = opponentSeats.slice(0, leftSplitCount);
+  const mobileRightSeats = opponentSeats.slice(leftSplitCount).reverse();
+
   return (
     <main className="min-h-screen bg-[#080E1A] text-slate-100 flex flex-col justify-between overflow-x-hidden">
       {/* TOP BAR */}
@@ -134,7 +223,10 @@ export function CardTablePage({
           <div className="text-xs text-slate-300 tabular-nums">
             Trick <strong className="font-mono text-white">#{game.trickNumber}</strong>
           </div>
-          <div className="hidden sm:block text-xs text-slate-400 tabular-nums">
+          <div className="hidden sm:block text-xs text-slate-400">
+            {geometry.shapeName} Table ({geometry.playerCount} Players)
+          </div>
+          <div className="hidden lg:block text-xs text-slate-400 tabular-nums">
             Discard: {game.discardCount} cards
           </div>
         </div>
@@ -209,160 +301,280 @@ export function CardTablePage({
         </div>
       )}
 
-      {/* CENTER: OPPONENTS + GREEN FELT CARD TABLE */}
-      <section className="flex-1 w-full max-w-6xl mx-auto px-4 py-4 flex flex-col justify-center gap-4 relative">
-        {/* Opponent Seats Around Top/Sides of Table */}
-        <div
-          className="flex flex-wrap items-center justify-center gap-3"
-          data-testid="opponents-row"
-        >
-          {opponents.map((opp) => {
-            const isTurn = opp.id === game.currentTurnPlayerId;
-            const escaped = opp.finishedRank !== null;
-            return (
-              <div
-                key={opp.id}
-                className={`w-[195px] sm:w-[220px] p-2.5 rounded-xl border transition-all flex items-center justify-between gap-2 ${
-                  isTurn
-                    ? 'bg-amber-500/15 border-amber-400 shadow-lg shadow-amber-950/30'
-                    : escaped
-                      ? 'bg-emerald-950/35 border-emerald-500/35 opacity-80'
-                      : 'bg-[#111827]/90 border-white/10'
-                }`}
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <AvatarIcon avatarId={opp.avatar} size="sm" />
-                  <div className="min-w-0">
-                    <div className="text-xs font-bold text-white truncate flex items-center gap-1">
-                      {opp.username}
-                      {opp.isBot && <Bot className="w-3 h-3 text-sky-400 shrink-0" />}
-                    </div>
-                    <div className="text-[11px] text-slate-400 tabular-nums">
-                      {escaped ? (
-                        <span className="text-emerald-300 font-semibold">
-                          Escaped #{opp.finishedRank}
-                        </span>
-                      ) : opp.connectionStatus === 'DISCONNECTED' ? (
-                        <span className="text-amber-400">Disconnected</span>
-                      ) : isTurn ? (
-                        <span className="text-amber-300 font-semibold">
-                          Thinking...
-                        </span>
-                      ) : (
-                        <span>{opp.cardCount} cards</span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {!escaped && <CardBack count={opp.cardCount} />}
-              </div>
-            );
-          })}
+      {/* CENTER: POLYGONAL FELT TABLE & CORNER SEATS */}
+      <section className="flex-1 w-full max-w-6xl mx-auto px-3 sm:px-6 py-3 flex flex-col justify-center gap-3 relative">
+        {/* Mobile Ordered Opponents Strip (< md): Left = Plays After You, Right = Played Before */}
+        <div className="md:hidden space-y-2">
+          <div className="flex items-center justify-between text-[11px] text-slate-400 px-1">
+            <span>← Plays After You</span>
+            <span className="font-semibold text-amber-300">
+              {geometry.shapeName} ({geometry.playerCount} Corners)
+            </span>
+            <span>Played Before →</span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 items-start">
+            <div className="space-y-2">
+              {mobileLeftSeats.map((seat) => (
+                <SeatCard
+                  key={`m-${seat.player.id}`}
+                  seat={seat}
+                  isTurn={seat.player.id === game.currentTurnPlayerId}
+                  playerCount={geometry.playerCount}
+                  compact={true}
+                />
+              ))}
+            </div>
+            <div className="space-y-2">
+              {mobileRightSeats.map((seat) => (
+                <SeatCard
+                  key={`m-${seat.player.id}`}
+                  seat={seat}
+                  isTurn={seat.player.id === game.currentTurnPlayerId}
+                  playerCount={geometry.playerCount}
+                  compact={true}
+                />
+              ))}
+            </div>
+          </div>
         </div>
 
-        {/* Physical Oval Green Felt Card Table */}
-        <div className="relative mx-auto w-full max-w-4xl rounded-[40px] sm:rounded-[88px] bg-[radial-gradient(ellipse_at_center,#146c43_0%,#0F5132_52%,#08331e_100%)] border-[8px] border-[#3B2314] shadow-[0_20px_60px_rgba(0,0,0,0.7),inset_0_0_0_2px_rgba(245,158,11,0.35)] px-6 py-8 sm:py-10 min-h-[250px] sm:min-h-[290px] flex flex-col items-center justify-between gap-5">
-          {/* Trick Metadata Strip */}
-          <div className="w-full flex flex-wrap items-center justify-between gap-2 text-xs">
-            <div className="px-3 py-1 rounded-lg bg-black/30 text-amber-200 font-medium">
-              {game.leadingSuit ? (
-                <span>
-                  Lead Suit:{' '}
-                  <strong className="text-white">
-                    {SUIT_SYMBOL[game.leadingSuit]} {game.leadingSuit}
-                  </strong>
-                </span>
-              ) : (
-                <span>Fresh Trick — Leader Plays Any Card</span>
-              )}
-            </div>
+        {/* Polygonal Table Stage */}
+        <div
+          data-testid="table-arena"
+          data-table-shape={geometry.shapeName}
+          data-table-corners={geometry.playerCount}
+          className="relative mx-auto w-full max-w-[880px] md:aspect-[5/3] flex items-center justify-center"
+        >
+          {/* Desktop Polygonal Felt SVG (Triangle / Square / Pentagon / Hexagon) */}
+          <svg
+            viewBox={`0 0 ${geometry.svgViewBoxWidth} ${geometry.svgViewBoxHeight}`}
+            className="hidden md:block absolute inset-0 w-full h-full pointer-events-none select-none overflow-visible drop-shadow-[0_22px_50px_rgba(0,0,0,0.72)]"
+            aria-hidden="true"
+          >
+            <defs>
+              <radialGradient id="thullaFelt" cx="50%" cy="50%" r="58%">
+                <stop offset="0%" stopColor="#17784b" />
+                <stop offset="55%" stopColor="#0F5132" />
+                <stop offset="100%" stopColor="#072c1a" />
+              </radialGradient>
+              <marker
+                id="turnFlowArrow"
+                viewBox="0 0 10 10"
+                refX="7"
+                refY="5"
+                markerWidth="5"
+                markerHeight="5"
+                orient="auto-start-reverse"
+              >
+                <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#F59E0B" fillOpacity="0.65" />
+              </marker>
+            </defs>
 
-            <div className="flex items-center gap-2">
+            {/* Wooden Rim + Felt Surface */}
+            <path
+              d={geometry.outerPath}
+              fill="url(#thullaFelt)"
+              stroke="#3B2314"
+              strokeWidth="16"
+              strokeLinejoin="round"
+            />
+
+            {/* Gold Table Trim */}
+            <path
+              d={geometry.innerTrimPath}
+              fill="none"
+              stroke="#F59E0B"
+              strokeOpacity="0.36"
+              strokeWidth="2.5"
+              strokeLinejoin="round"
+            />
+
+            {/* Clockwise Turn-Flow Arrows Around Inner Felt */}
+            {geometry.turnArcPaths.map((d, idx) => (
+              <path
+                key={idx}
+                d={d}
+                fill="none"
+                stroke="#F59E0B"
+                strokeOpacity="0.38"
+                strokeWidth="2"
+                strokeDasharray="5 5"
+                markerEnd="url(#turnFlowArrow)"
+              />
+            ))}
+
+            {/* Corner Brass Markers at Each Polygon Vertex */}
+            {geometry.vertices.map((v, idx) => (
+              <circle
+                key={idx}
+                cx={v.x}
+                cy={v.y}
+                r="5"
+                fill="#F59E0B"
+                fillOpacity="0.65"
+                stroke="#3B2314"
+                strokeWidth="2"
+              />
+            ))}
+          </svg>
+
+          {/* Desktop Corner Seats Positioned on Each Polygon Vertex */}
+          <div
+            className="hidden md:block absolute inset-0 pointer-events-none"
+            data-testid="opponents-row"
+          >
+            {opponentSeats.map((seat) => (
+              <div
+                key={seat.player.id}
+                style={{
+                  left: `${seat.xPercent}%`,
+                  top: `${seat.yPercent}%`,
+                }}
+                className="absolute -translate-x-1/2 -translate-y-1/2 pointer-events-auto z-20"
+              >
+                <SeatCard
+                  seat={seat}
+                  isTurn={seat.player.id === game.currentTurnPlayerId}
+                  playerCount={geometry.playerCount}
+                />
+              </div>
+            ))}
+
+            {/* Bottom Corner Anchor for Current Player ("YOU") */}
+            {selfSeat && (
+              <div
+                style={{
+                  left: `${selfSeat.xPercent}%`,
+                  top: `${selfSeat.yPercent}%`,
+                }}
+                className="absolute -translate-x-1/2 -translate-y-1/2 pointer-events-auto z-20 flex items-center gap-2"
+              >
+                {geometry.playerCount >= 3 && (
+                  <span className="px-2 py-1 rounded-md bg-[#0B1324]/90 border border-sky-400/30 text-[10px] font-semibold text-sky-300 whitespace-nowrap">
+                    ← Next (Left)
+                  </span>
+                )}
+                <div
+                  data-seat-relation="SELF"
+                  data-seat-step={0}
+                  className={`px-3.5 py-1.5 rounded-xl border text-xs font-bold whitespace-nowrap shadow-md ${
+                    isMyTurn
+                      ? 'bg-amber-500 border-amber-300 text-slate-950'
+                      : 'bg-[#111827]/95 border-emerald-400/45 text-emerald-200'
+                  }`}
+                >
+                  YOU · {selfSeat.player.username}
+                </div>
+                {geometry.playerCount >= 3 && (
+                  <span className="px-2 py-1 rounded-md bg-[#0B1324]/90 border border-emerald-400/30 text-[10px] font-semibold text-emerald-300 whitespace-nowrap">
+                    Prev (Right) →
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Center Felt Interior (Single Trick Pile & Metadata for Both Mobile & Desktop) */}
+          <div className="relative z-10 w-full md:w-auto rounded-[32px] md:rounded-none bg-[radial-gradient(ellipse_at_center,#146c43_0%,#0F5132_55%,#08331e_100%)] md:bg-none border-[6px] md:border-0 border-[#3B2314] px-5 py-6 md:p-0 min-h-[235px] md:min-h-0 md:absolute md:inset-x-[30%] md:inset-y-[24%] flex flex-col items-center justify-between gap-2">
+            {/* Trick Metadata Strip */}
+            <div className="w-full flex flex-wrap items-center justify-center gap-1.5 text-xs">
+              <div className="px-2.5 py-1 rounded-lg bg-black/45 text-amber-200 font-medium whitespace-nowrap">
+                {game.leadingSuit ? (
+                  <span>
+                    Lead:{' '}
+                    <strong className="text-white">
+                      {SUIT_SYMBOL[game.leadingSuit]} {game.leadingSuit}
+                    </strong>
+                  </span>
+                ) : (
+                  <span>Fresh Trick — Lead Any Card</span>
+                )}
+              </div>
+
               {secondsLeft !== null && (
                 <span
-                  className={`px-3 py-1 rounded-lg bg-black/35 font-mono font-bold tabular-nums ${
+                  className={`px-2 py-1 rounded-lg bg-black/50 font-mono font-bold tabular-nums whitespace-nowrap ${
                     secondsLeft <= 7 ? 'text-rose-300' : 'text-amber-300'
                   }`}
                 >
                   {secondsLeft}s
                 </span>
               )}
-              <span className="px-3 py-1 rounded-lg bg-black/30 text-emerald-100">
+              <span className="px-2.5 py-1 rounded-lg bg-black/45 text-emerald-100 whitespace-nowrap max-w-[190px] truncate">
                 Turn:{' '}
                 <strong className="text-white">
                   {activeTurnPlayer?.username ?? '—'}
                 </strong>
               </span>
             </div>
-          </div>
 
-          {/* Center Trick Cards */}
-          <div
-            data-testid="trick-pile"
-            className="flex flex-wrap items-center justify-center gap-3 sm:gap-4 min-h-[115px]"
-          >
-            <AnimatePresence>
-              {game.currentTrick.length === 0 ? (
-                <motion.div
-                  key="empty-trick"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  className="text-center space-y-1 text-emerald-100/75"
-                >
-                  <div className="text-sm font-semibold">
-                    {isMyTurn
-                      ? 'Your lead! Pick a card below to start the trick.'
-                      : `Waiting for ${activeTurnPlayer?.username ?? 'leader'} to lead...`}
-                  </div>
-                  <div className="text-xs text-emerald-200/60">
-                    {game.rules.firstTrickSafe && game.trickNumber === 1
-                      ? 'Trick 1 is safe (no Thulla pickup on Trick 1).'
-                      : 'Match the lead suit or drop an off-suit Thulla!'}
-                  </div>
-                </motion.div>
-              ) : (
-                game.currentTrick.map((play) => (
+            {/* Center Trick Cards */}
+            <div
+              data-testid="trick-pile"
+              className="flex flex-wrap items-center justify-center gap-2.5 sm:gap-3 min-h-[105px]"
+            >
+              <AnimatePresence>
+                {game.currentTrick.length === 0 ? (
                   <motion.div
-                    key={`${play.moveNumber}-${play.card.id}`}
-                    initial={{ opacity: 0, y: 24, scale: 0.85 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.8 }}
-                    transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                    className="flex flex-col items-center gap-1.5"
+                    key="empty-trick"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="text-center space-y-1 text-emerald-100/80 px-2"
                   >
-                    <PlayingCard card={play.card} compact={true} />
-                    <span
-                      className={`text-[11px] font-semibold px-2 py-0.5 rounded bg-black/45 ${
-                        play.isOffSuit ? 'text-rose-300' : 'text-emerald-100'
-                      }`}
-                    >
-                      {play.username}
-                      {play.isOffSuit ? ' · THULLA!' : ''}
-                    </span>
+                    <div className="text-sm font-semibold">
+                      {isMyTurn
+                        ? 'Your lead! Pick a card below to start the trick.'
+                        : `Waiting for ${activeTurnPlayer?.username ?? 'leader'} to lead...`}
+                    </div>
+                    <div className="text-xs text-emerald-200/65">
+                      {game.rules.firstTrickSafe && game.trickNumber === 1
+                        ? 'Trick 1 is safe (no Thulla pickup on Trick 1).'
+                        : 'Match the lead suit or drop an off-suit Thulla!'}
+                    </div>
                   </motion.div>
-                ))
-              )}
-            </AnimatePresence>
-          </div>
+                ) : (
+                  game.currentTrick.map((play) => (
+                    <motion.div
+                      key={`${play.moveNumber}-${play.card.id}`}
+                      initial={{ opacity: 0, y: 20, scale: 0.85 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.8 }}
+                      transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                      className="flex flex-col items-center gap-1"
+                    >
+                      <PlayingCard card={play.card} compact={true} />
+                      <span
+                        className={`text-[11px] font-semibold px-2 py-0.5 rounded bg-black/50 ${
+                          play.isOffSuit ? 'text-rose-300' : 'text-emerald-100'
+                        }`}
+                      >
+                        {play.username}
+                        {play.isOffSuit ? ' · THULLA!' : ''}
+                      </span>
+                    </motion.div>
+                  ))
+                )}
+              </AnimatePresence>
+            </div>
 
-          {/* Live Event / Thulla Alert Footer */}
-          <div className="w-full text-center">
-            {game.lastThullaEvent &&
-            Date.now() - game.lastThullaEvent.timestamp < 5000 ? (
-              <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-rose-950/80 border border-rose-400/50 text-xs font-bold text-rose-200">
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />
-                {game.lastEventMessage}
-              </div>
-            ) : (
-              <p
-                data-testid="table-status-message"
-                className="text-xs font-medium text-emerald-100/90"
-              >
-                {game.lastEventMessage}
-              </p>
-            )}
+            {/* Live Event / Thulla Alert Footer */}
+            <div className="w-full text-center">
+              {game.lastThullaEvent &&
+              Date.now() - game.lastThullaEvent.timestamp < 5000 ? (
+                <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-rose-950/85 border border-rose-400/50 text-xs font-bold text-rose-200">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />
+                  {game.lastEventMessage}
+                </div>
+              ) : (
+                <p
+                  data-testid="table-status-message"
+                  className="text-xs font-medium text-emerald-100/90"
+                >
+                  {game.lastEventMessage}
+                </p>
+              )}
+            </div>
           </div>
         </div>
 
